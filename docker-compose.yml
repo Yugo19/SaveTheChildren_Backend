@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  fastapi_app:
+    build: .
+    container_name: stc-backend
+    ports:
+      - "8000:8000"
+    environment:
+      DB_URI: mongodb://stc_admin:${MONGO_PASSWORD}@mongodb:27017/stc-db?authSource=stc-db
+      DB_NAME: stc-db
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      AZURE_STORAGE_CONNECTION_STRING: ${AZURE_STORAGE_CONNECTION_STRING:-}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      POSTGRES_URI: postgresql+asyncpg://stc_user:${POSTGRES_PASSWORD}@postgres:5432/stc_vectors
+      DEBUG: "false"
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      - mongodb
+      - redis
+      - postgres
+    networks:
+      - stc-network
+
+  mongodb:
+    image: mongo:8.0
+    container_name: stc-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: stc_admin
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      MONGO_INITDB_DATABASE: stc-db
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - mongo_data:/data/db
+      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - stc-network
+
+  redis:
+    image: redis:7.2
+    container_name: stc-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    ports:
+      - "127.0.0.1:6379:6379"
+    networks:
+      - stc-network
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: stc-postgres
+    environment:
+      POSTGRES_USER: stc_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: stc_vectors
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - stc-network
+
+volumes:
+  mongo_data:
+  postgres_data:
+
+networks:
+  stc-network:
+    driver: bridge
