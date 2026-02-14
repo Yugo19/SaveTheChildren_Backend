@@ -290,7 +290,6 @@ class KenyaAPIService:
                 "external_id": record.get("id") or f"kenya_{record.get('case_date', '')}_{record.get('county', '')}_{record.get('sub_county', '')}",
                 "source": "kenya_api",
                 "case_date": case_date,
-                "date_reported": case_date,
                 "county": record.get("county", "Unknown"),
                 "sub_county": record.get("sub_county"),
                 

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from typing import Optional
 from app.db.client import get_database
 from app.services.geospatial_service import GeospatialService
-from app.core.security import get_current_user, TokenData
+from app.core.security import any_authenticated, TokenData
 from app.core.logging import logger
 
 router = APIRouter(prefix="/geospatial", tags=["Geospatial"])
@@ -13,7 +13,7 @@ async def get_nearby_cases(
     latitude: float = Query(...),
     longitude: float = Query(...),
     radius_km: float = Query(10, ge=1, le=100),
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(any_authenticated),
     db=Depends(get_database)
 ):
     """Get cases near a specific location"""
@@ -26,7 +26,7 @@ async def get_nearby_cases(
 @router.get("/hotspots")
 async def get_hotspots(
     radius_km: float = Query(5, ge=1, le=50),
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(any_authenticated),
     db=Depends(get_database)
 ):
     """Get case hotspots/clusters"""
@@ -39,7 +39,7 @@ async def get_hotspots(
 @router.get("/counties")
 async def get_county_boundaries(
     source: Optional[str] = Query(None, description="Filter by data source (e.g., 'kenya_api')"),
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(any_authenticated),
     db=Depends(get_database)
 ):
     """Get county statistics with geographic info. Supports Kenya API data via source='kenya_api'"""
@@ -54,7 +54,7 @@ async def get_heatmap_data(
     county: Optional[str] = None,
     abuse_type: Optional[str] = None,
     source: Optional[str] = Query(None, description="Filter by data source (e.g., 'kenya_api')"),
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(any_authenticated),
     db=Depends(get_database)
 ):
     """Get heatmap data for visualization. Supports Kenya API data via source='kenya_api'"""
@@ -67,7 +67,7 @@ async def get_heatmap_data(
 @router.get("/density")
 async def get_case_density(
     zoom_level: int = Query(10, ge=1, le=20),
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(any_authenticated),
     db=Depends(get_database)
 ):
     """Get case density grid"""
@@ -84,7 +84,7 @@ async def get_map_data(
     year: Optional[int] = None,
     source: Optional[str] = Query(None, description="Filter by data source (e.g., 'kenya_api')"),
     format: str = Query("geojson", description="Output format: 'geojson' or 'simple'"),
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(any_authenticated),
     db=Depends(get_database)
 ):
     """

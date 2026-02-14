@@ -47,7 +47,7 @@ class UserResponse(BaseModel):
 # Case Schemas
 class CaseCreate(BaseModel):
     case_id: str
-    date_reported: datetime
+    case_date: datetime
     county: str
     subcounty: str
     child_age: int = Field(..., ge=0, le=18)
@@ -62,7 +62,7 @@ class CaseCreate(BaseModel):
 class CaseResponse(BaseModel):
     id: str = Field(alias="_id")
     case_id: str
-    date_reported: datetime
+    case_date: datetime
     county: str
     abuse_type: str
     status: CaseStatus
@@ -75,6 +75,7 @@ class CaseResponse(BaseModel):
 
 
 class CaseUpdate(BaseModel):
+    case_date: Optional[datetime] = None
     status: Optional[CaseStatus] = None
     severity: Optional[SeverityLevel] = None
     description: Optional[str] = None

@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from app.db.client import get_database
 from app.core.security import require_role, TokenData
 from app.core.logging import logger
+from app.config import settings
 import psutil
 import os
 
@@ -210,22 +211,54 @@ async def get_database_stats(
 
 @router.post("/clear-cache")
 async def clear_cache(
+    pattern: str = Query(None, description="Pattern to match for selective cache clear"),
     current_user: TokenData = Depends(require_role("admin")),
     db=Depends(get_database)
 ):
     """Clear system cache (admin only)"""
     try:
-        # In a real application, you would clear Redis cache here
-        logger.info(f"Cache clearing initiated by {current_user.user_id}")
+        from app.core.cache import cache
+        
+        if pattern:
+            cache.invalidate(pattern)
+            message = f"Cache cleared for pattern: {pattern}"
+        else:
+            cache.invalidate()
+            message = "All cache cleared"
+        
+        logger.info(f"Cache clearing initiated by {current_user.user_id}: {message}")
 
         return {
             "status": "cache_cleared",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "message": "Cache cleared successfully"
+            "message": message,
+            "cache_size": cache.size()
         }
     except Exception as e:
         logger.error(f"Error clearing cache: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error clearing cache"
+        )
+
+
+@router.get("/cache-stats")
+async def get_cache_stats(
+    current_user: TokenData = Depends(require_role("admin"))
+):
+    """Get cache statistics (admin only)"""
+    try:
+        from app.core.cache import cache
+        
+        return {
+            "cache_size": cache.size(),
+            "cache_enabled": settings.ENABLE_QUERY_CACHE,
+            "cache_ttl": settings.CACHE_TTL,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting cache stats: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error getting cache stats"
         )

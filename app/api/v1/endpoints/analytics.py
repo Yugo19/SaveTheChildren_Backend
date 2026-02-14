@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from typing import Optional
 from app.db.client import get_database
 from app.services.analytics_service import AnalyticsService
-from app.core.security import get_current_user, TokenData
+from app.core.security import any_authenticated, TokenData
 from app.core.logging import logger
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
@@ -12,7 +12,7 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
 async def get_dashboard_summary(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(any_authenticated),
     db=Depends(get_database)
 ):
     """Get dashboard summary with key metrics"""
@@ -25,7 +25,7 @@ async def get_dashboard_summary(
 @router.get("/county/{county}")
 async def get_county_analysis(
     county: str,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(any_authenticated),
     db=Depends(get_database)
 ):
     """Get detailed analysis for a specific county"""
@@ -38,7 +38,7 @@ async def get_county_analysis(
 @router.get("/abuse-type/{abuse_type}")
 async def get_abuse_type_analysis(
     abuse_type: str,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(any_authenticated),
     db=Depends(get_database)
 ):
     """Get detailed analysis for a specific abuse type"""
@@ -52,7 +52,7 @@ async def get_abuse_type_analysis(
 async def get_time_series(
     granularity: str = Query("monthly", enum=["daily", "weekly", "monthly"]),
     year: Optional[int] = None,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(any_authenticated),
     db=Depends(get_database)
 ):
     """Get time series data for trend analysis"""
@@ -64,7 +64,7 @@ async def get_time_series(
 
 @router.get("/severity-distribution")
 async def get_severity_distribution(
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(any_authenticated),
     db=Depends(get_database)
 ):
     """Get severity distribution across all cases"""

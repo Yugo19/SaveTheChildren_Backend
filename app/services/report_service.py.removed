@@ -3,6 +3,8 @@ from fastapi import HTTPException, status
 from bson import ObjectId
 from datetime import datetime, timedelta, timezone
 from app.core.logging import logger
+from app.utils.severity_mapping import get_severity_aggregation_stage
+from app.utils.date_filters import build_date_filter
 import uuid
 import json
 
@@ -123,9 +125,12 @@ class ReportService:
     async def _generate_summary_report(self, filters: dict, include_kenya: bool = True):
         """Generate summary report data with optional Kenya API data"""
         match_filters = self._build_filters(filters)
+        
+        severity_expr = get_severity_aggregation_stage()
 
         pipeline = [
             {"$match": match_filters},
+            {"$addFields": {"derived_severity": severity_expr}},
             {
                 "$facet": {
                     "total_cases": [{"$count": "count"}],
@@ -137,7 +142,7 @@ class ReportService:
                         {"$group": {"_id": "$status", "count": {"$sum": 1}}}
                     ],
                     "by_severity": [
-                        {"$group": {"_id": "$severity", "count": {"$sum": 1}}}
+                        {"$group": {"_id": "$derived_severity", "count": {"$sum": 1}}}
                     ],
                     "by_source": [
                         {"$group": {"_id": "$source", "count": {"$sum": 1}}}
@@ -186,15 +191,18 @@ class ReportService:
     async def _generate_county_report(self, filters: dict, include_kenya: bool = True):
         """Generate county-wise report"""
         match_filters = self._build_filters(filters)
+        
+        severity_expr = get_severity_aggregation_stage()
 
         pipeline = [
             {"$match": match_filters},
+            {"$addFields": {"derived_severity": severity_expr}},
             {
                 "$group": {
                     "_id": "$county",
                     "total": {"$sum": 1},
                     "high_severity": {
-                        "$sum": {"$cond": [{"$eq": ["$severity", "high"]}, 1, 0]}
+                        "$sum": {"$cond": [{"$eq": ["$derived_severity", "high"]}, 1, 0]}
                     },
                     "open_cases": {
                         "$sum": {"$cond": [{"$eq": ["$status", "open"]}, 1, 0]}
@@ -253,13 +261,11 @@ class ReportService:
         if filters.get("status"):
             match_filters["status"] = filters["status"]
 
-        # Date range
-        if filters.get("date_from") or filters.get("date_to"):
-            date_filter = {}
-            if filters.get("date_from"):
-                date_filter["$gte"] = datetime.fromisoformat(filters["date_from"])
-            if filters.get("date_to"):
-                date_filter["$lte"] = datetime.fromisoformat(filters["date_to"])
-            match_filters["date_reported"] = date_filter
+        # Use centralized date filter utility
+        date_filters = build_date_filter(
+            date_from=filters.get("date_from"),
+            date_to=filters.get("date_to")
+        )
+        match_filters.update(date_filters)
 
         return match_filters

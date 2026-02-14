@@ -39,7 +39,7 @@ class FileService:
         user_id: str,
         description: str = None
     ) -> dict:
-        """Upload file, chunk it, generate embeddings, and store in Pinecone"""
+        """Upload file, chunk it, generate embeddings, and store in PostgreSQL vector database"""
         try:
             file_id = str(uuid.uuid4())
             
@@ -145,11 +145,27 @@ class FileService:
                 .sort("upload_date", -1)\
                 .to_list(limit)
 
+            # Convert ObjectId fields to strings for JSON serialization
+            serialized_files = []
+            for file_doc in files:
+                serialized_file = {
+                    "file_id": file_doc["file_id"],
+                    "file_name": file_doc["file_name"],
+                    "file_type": file_doc["file_type"],
+                    "size_bytes": file_doc["size_bytes"],
+                    "chunk_count": file_doc.get("chunk_count", 0),
+                    "upload_date": file_doc["upload_date"].isoformat() if isinstance(file_doc["upload_date"], datetime) else file_doc["upload_date"],
+                    "uploaded_by": str(file_doc["uploaded_by"]),
+                    "description": file_doc.get("description", ""),
+                    "indexed_in_vector_db": file_doc.get("indexed_in_vector_db", False)
+                }
+                serialized_files.append(serialized_file)
+
             return {
                 "total": total,
                 "page": page,
                 "limit": limit,
-                "files": files
+                "files": serialized_files
             }
         except Exception as e:
             logger.error(f"Error listing files: {e}")
@@ -217,8 +233,8 @@ class FileService:
             if file_type:
                 filter_dict["file_type"] = file_type
             
-            # Search Pinecone
-            results = await self.pinecone_service.search_similar_chunks(
+            # Search PostgreSQL vector database
+            results = await self.vector_service.search_similar_chunks(
                 query_embedding,
                 top_k=top_k,
                 filter_dict=filter_dict if filter_dict else None

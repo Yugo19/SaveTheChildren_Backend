@@ -13,11 +13,12 @@ router = APIRouter(prefix="/monitoring", tags=["Monitoring"])
 
 @router.get("/dashboard")
 async def get_monitoring_dashboard(
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(admin_required),
     db=Depends(get_database)
 ):
     """
-    Comprehensive monitoring dashboard showing:
+    Comprehensive monitoring dashboard (Admin only)
+    Shows:
     - Chatbot health and token usage
     - Scraping system status
     - Kenya API data status
@@ -53,7 +54,6 @@ async def get_monitoring_dashboard(
         dashboard["database"] = {
             "total_cases": await db.cases.count_documents({}),
             "total_users": await db.users.count_documents({}),
-            "total_reports": await db.reports.count_documents({}),
             "total_conversations": await db.conversations.count_documents({})
         }
         
@@ -98,7 +98,6 @@ async def get_system_health(
         collections = {
             "users": await db.users.count_documents({}),
             "cases": await db.cases.count_documents({}),
-            "reports": await db.reports.count_documents({}),
             "conversations": await db.conversations.count_documents({}),
             "messages": await db.messages.count_documents({}),
             "scraping_jobs": await db.scraping_jobs.count_documents({}),

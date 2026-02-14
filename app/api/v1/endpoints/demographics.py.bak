@@ -1,0 +1,264 @@
+from fastapi import APIRouter, Depends, Query, HTTPException
+from typing import Optional
+from datetime import datetime
+from app.db.client import get_database
+from app.core.security import get_current_user, TokenData
+from app.core.logging import logger
+
+router = APIRouter(prefix="/demographics", tags=["Demographics"])
+
+
+@router.get("")
+async def get_demographics(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    status: Optional[str] = None,
+    top_n: int = Query(10, ge=1, le=100),
+    current_user: TokenData = Depends(get_current_user),
+    db=Depends(get_database)
+):
+    """
+    Get demographics summary with sex and age distribution
+    
+    Returns:
+    - Summary statistics (total cases, gender breakdown, high-risk age groups)
+    - Distribution by sex and age bands
+    """
+    try:
+        # Build filters
+        filters = {}
+        
+        if date_from or date_to:
+            date_filter = {}
+            if date_from:
+                try:
+                    date_filter["$gte"] = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid date_from format")
+            if date_to:
+                try:
+                    date_filter["$lte"] = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid date_to format")
+            filters["case_date"] = date_filter
+        
+        if status:
+            filters["status"] = status
+        
+        # Get total cases
+        total_cases = await db.cases.count_documents(filters)
+        
+        # Get previous period for delta calculation (same time range, shifted back)
+        if date_from and date_to:
+            try:
+                date_from_dt = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+                date_to_dt = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+                period_duration = date_to_dt - date_from_dt
+                
+                prev_filters = dict(filters)
+                prev_filters["case_date"] = {
+                    "$gte": date_from_dt - period_duration,
+                    "$lte": date_from_dt
+                }
+                prev_total = await db.cases.count_documents(prev_filters)
+                total_delta_pct = ((total_cases - prev_total) / prev_total * 100) if prev_total > 0 else 100
+            except:
+                total_delta_pct = 0
+        else:
+            total_delta_pct = 0
+        
+        # Get active cases
+        active_filters = dict(filters)
+        active_filters["status"] = {"$in": ["open", "in_progress", "active"]}
+        active_cases = await db.cases.count_documents(active_filters)
+        
+        # Get gender breakdown
+        gender_pipeline = [
+            {"$match": filters},
+            {
+                "$group": {
+                    "_id": "$victim_sex",
+                    "count": {"$sum": 1}
+                }
+            }
+        ]
+        
+        gender_results = await db.cases.aggregate(gender_pipeline).to_list(None)
+        
+        female_count = 0
+        male_count = 0
+        
+        for result in gender_results:
+            sex = result["_id"]
+            count = result["count"]
+            if sex and sex.lower() in ["female", "f"]:
+                female_count = count
+            elif sex and sex.lower() in ["male", "m"]:
+                male_count = count
+        
+        female_share_pct = (female_count / total_cases * 100) if total_cases > 0 else 0
+        male_share_pct = (male_count / total_cases * 100) if total_cases > 0 else 0
+        
+        # Get age distribution for high-risk calculation (0-5 years)
+        # Parse age ranges to identify 0-5 year olds
+        age_pipeline = [
+            {"$match": filters},
+            {
+                "$group": {
+                    "_id": "$victim_age_range",
+                    "count": {"$sum": 1}
+                }
+            }
+        ]
+        
+        age_results = await db.cases.aggregate(age_pipeline).to_list(None)
+        
+        high_risk_count = 0
+        for result in age_results:
+            age_range = result["_id"]
+            count = result["count"]
+            if age_range and _is_high_risk_age(age_range):
+                high_risk_count += count
+        
+        # Calculate high risk delta (using same period logic)
+        if date_from and date_to:
+            try:
+                prev_high_risk_filters = dict(prev_filters)
+                prev_high_risk_pipeline = [
+                    {"$match": prev_high_risk_filters},
+                    {"$group": {"_id": "$victim_age_range", "count": {"$sum": 1}}}
+                ]
+                prev_age_results = await db.cases.aggregate(prev_high_risk_pipeline).to_list(None)
+                prev_high_risk = sum(r["count"] for r in prev_age_results if r["_id"] and _is_high_risk_age(r["_id"]))
+                high_risk_delta_pct = ((high_risk_count - prev_high_risk) / prev_high_risk * 100) if prev_high_risk > 0 else 100
+            except:
+                high_risk_delta_pct = 0
+        else:
+            high_risk_delta_pct = 0
+        
+        # Get distribution by sex and age band
+        distribution_pipeline = [
+            {"$match": filters},
+            {
+                "$group": {
+                    "_id": {
+                        "age_band": "$victim_age_range",
+                        "sex": "$victim_sex"
+                    },
+                    "count": {"$sum": 1}
+                }
+            }
+        ]
+        
+        distribution_results = await db.cases.aggregate(distribution_pipeline).to_list(None)
+        
+        # Organize into age bands
+        age_bands_dict = {}
+        
+        for result in distribution_results:
+            age_band = result["_id"]["age_band"] or "Unknown"
+            sex = result["_id"]["sex"]
+            count = result["count"]
+            
+            # Normalize age band
+            normalized_band = _normalize_age_band(age_band)
+            
+            if normalized_band not in age_bands_dict:
+                age_bands_dict[normalized_band] = {
+                    "ageBand": normalized_band,
+                    "male": 0,
+                    "female": 0,
+                    "unknown": 0
+                }
+            
+            if sex and sex.lower() in ["male", "m"]:
+                age_bands_dict[normalized_band]["male"] += count
+            elif sex and sex.lower() in ["female", "f"]:
+                age_bands_dict[normalized_band]["female"] += count
+            else:
+                age_bands_dict[normalized_band]["unknown"] += count
+        
+        # Sort age bands
+        distribution_by_sex_age = sorted(
+            age_bands_dict.values(),
+            key=lambda x: _age_band_sort_key(x["ageBand"])
+        )
+        
+        logger.info(f"Demographics retrieved by user {current_user.user_id}")
+        
+        return {
+            "demographics": {
+                "summary": {
+                    "totalCases": total_cases,
+                    "totalDeltaPct": round(total_delta_pct, 2),
+                    "activeCases": active_cases,
+                    "femaleMinors": female_count,
+                    "femaleSharePct": round(female_share_pct, 2),
+                    "maleMinors": male_count,
+                    "maleSharePct": round(male_share_pct, 2),
+                    "highRiskAge0to5": high_risk_count,
+                    "highRiskDeltaPct": round(high_risk_delta_pct, 2)
+                },
+                "distributionBySexAge": distribution_by_sex_age
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting demographics: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving demographics: {str(e)}")
+
+
+def _is_high_risk_age(age_range: str) -> bool:
+    """Check if age range falls into high-risk category (0-5 years)"""
+    if not age_range:
+        return False
+    
+    age_range_lower = age_range.lower().strip()
+    
+    # Handle common patterns
+    high_risk_patterns = ["0-5", "0-4", "1-5", "<5", "under 5", "0 to 5", "0-3", "3-5"]
+    
+    for pattern in high_risk_patterns:
+        if pattern in age_range_lower:
+            return True
+    
+    return False
+
+
+def _normalize_age_band(age_range: str) -> str:
+    """Normalize age range to standard bands"""
+    if not age_range or age_range == "Unknown":
+        return "Unknown"
+    
+    age_range_lower = age_range.lower().strip()
+    
+    # Map to standard bands
+    if any(x in age_range_lower for x in ["0-5", "0-4", "1-5", "0 to 5", "0-3", "3-5", "<5", "under 5"]):
+        return "0-5"
+    elif any(x in age_range_lower for x in ["6-9", "5-9", "6-10"]):
+        return "6-9"
+    elif any(x in age_range_lower for x in ["10-14", "10-13"]):
+        return "10-14"
+    elif any(x in age_range_lower for x in ["15-17", "15-18", "15-19"]):
+        return "15-17"
+    elif any(x in age_range_lower for x in ["18+", "18-", "18 and above", ">18"]):
+        return "18+"
+    
+    # Return original if no match
+    return age_range
+
+
+def _age_band_sort_key(age_band: str) -> int:
+    """Get sort key for age band"""
+    order = {
+        "0-5": 0,
+        "6-9": 1,
+        "10-14": 2,
+        "15-17": 3,
+        "18+": 4,
+        "Unknown": 999
+    }
+    
+    return order.get(age_band, 500)

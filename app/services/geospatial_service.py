@@ -3,6 +3,7 @@ from fastapi import HTTPException, status
 from bson import ObjectId
 from datetime import datetime
 from app.core.logging import logger
+from app.utils.severity_mapping import get_severity_aggregation_stage
 from typing import Optional, Tuple
 
 
@@ -65,14 +66,17 @@ class GeospatialService:
     async def get_hotspots(self, radius_km: float = 5):
         """Get case hotspots/clusters"""
         try:
+            severity_expr = get_severity_aggregation_stage()
+            
             pipeline = [
                 {
                     "$match": {
                         "location": {"$exists": True},
-                        "latitude": {"$exists": True},
-                        "longitude": {"$exists": True}
+                        "latitude": {"$exists": True, "$ne": None},
+                        "longitude": {"$exists": True, "$ne": None}
                     }
                 },
+                {"$addFields": {"derived_severity": severity_expr}},
                 {
                     "$group": {
                         "_id": {
@@ -81,7 +85,7 @@ class GeospatialService:
                         },
                         "count": {"$sum": 1},
                         "high_severity": {
-                            "$sum": {"$cond": [{"$eq": ["$severity", "high"]}, 1, 0]}
+                            "$sum": {"$cond": [{"$eq": ["$derived_severity", "high"]}, 1, 0]}
                         },
                         "abuse_types": {"$push": "$abuse_type"}
                     }
@@ -113,18 +117,21 @@ class GeospatialService:
     async def get_county_boundaries(self, source: Optional[str] = None):
         """Get case statistics by county with geographic info"""
         try:
+            severity_expr = get_severity_aggregation_stage()
+            
             match_filter = {"county": {"$exists": True}}
             if source:
                 match_filter["source"] = source
             
             pipeline = [
                 {"$match": match_filter},
+                {"$addFields": {"derived_severity": severity_expr}},
                 {
                     "$group": {
                         "_id": "$county",
                         "case_count": {"$sum": 1},
                         "high_severity": {
-                            "$sum": {"$cond": [{"$eq": ["$severity", "high"]}, 1, 0]}
+                            "$sum": {"$cond": [{"$eq": ["$derived_severity", "high"]}, 1, 0]}
                         },
                         "open_cases": {
                             "$sum": {"$cond": [{"$eq": ["$status", "open"]}, 1, 0]}
@@ -168,14 +175,14 @@ class GeospatialService:
         """Get heatmap data for visualization"""
         try:
             filters = {
-                "latitude": {"$exists": True},
-                "longitude": {"$exists": True}
+                "latitude": {"$exists": True, "$ne": None},
+                "longitude": {"$exists": True, "$ne": None}
             }
             
             if county:
-                filters["county"] = county
+                filters["county"] = county.strip()  # Trim whitespace
             if abuse_type:
-                filters["abuse_type"] = abuse_type
+                filters["abuse_type"] = abuse_type.strip()
             if source:
                 filters["source"] = source
             
@@ -224,16 +231,19 @@ class GeospatialService:
     async def get_case_density(self, zoom_level: int = 10):
         """Get case density grid"""
         try:
+            severity_expr = get_severity_aggregation_stage()
+            
             # Create a grid based on zoom level
             grid_size = 1.0 / (2 ** (zoom_level - 1))
             
             pipeline = [
                 {
                     "$match": {
-                        "latitude": {"$exists": True},
-                        "longitude": {"$exists": True}
+                        "latitude": {"$exists": True, "$ne": None},
+                        "longitude": {"$exists": True, "$ne": None}
                     }
                 },
+                {"$addFields": {"derived_severity": severity_expr}},
                 {
                     "$group": {
                         "_id": {
@@ -252,7 +262,7 @@ class GeospatialService:
                         },
                         "count": {"$sum": 1},
                         "high_severity": {
-                            "$sum": {"$cond": [{"$eq": ["$severity", "high"]}, 1, 0]}
+                            "$sum": {"$cond": [{"$eq": ["$derived_severity", "high"]}, 1, 0]}
                         }
                     }
                 }
@@ -292,9 +302,9 @@ class GeospatialService:
             # Build query filters
             filters = {}
             if county:
-                filters["county"] = county
+                filters["county"] = county.strip()  # Trim whitespace
             if abuse_type:
-                filters["abuse_type"] = abuse_type
+                filters["abuse_type"] = abuse_type.strip()
             if year:
                 filters["year"] = year
             if source:

@@ -16,6 +16,12 @@ class TokenData:
         self.user_id = user_id
         self.role = role
         self.email = email
+    
+    @property
+    def user_id_obj(self):
+        """Get ObjectId version of user_id for MongoDB queries"""
+        from bson import ObjectId
+        return ObjectId(self.user_id)
 
 
 def hash_password(password: str) -> str:
@@ -59,6 +65,42 @@ def create_refresh_token(data: Dict[str, Any]) -> str:
     return encoded_jwt
 
 
+def verify_refresh_token(token: str) -> TokenData:
+    """Verify and decode refresh token"""
+    try:
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM]
+        )
+        
+        # Check if it's a refresh token
+        token_type = payload.get("type")
+        if token_type != "refresh":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token type. Refresh token required"
+            )
+        
+        user_id: str = payload.get("sub")
+        role: str = payload.get("role")
+        email: str = payload.get("email")
+
+        if user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token"
+            )
+
+        return TokenData(user_id=user_id, role=role, email=email)
+
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token"
+        )
+
+
 def verify_token(token: str) -> TokenData:
     """Verify and decode JWT token"""
     try:
@@ -98,11 +140,19 @@ def require_role(*roles):
         if current_user.role not in roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient permissions"
+                detail="Insufficient permissions. Required roles: " + ", ".join(roles)
             )
         return current_user
 
     return role_checker
 
 
+# Role-based access control dependencies
 admin_required = require_role("admin")
+admin_or_member = require_role("admin", "member")
+any_authenticated = get_current_user  # All authenticated users
+
+
+def check_resource_ownership(current_user: TokenData, resource_user_id: str) -> bool:
+    """Check if user owns the resource or is admin"""
+    return current_user.role == "admin" or current_user.user_id == resource_user_id

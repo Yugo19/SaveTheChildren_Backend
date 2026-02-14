@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     # Database
     DB_URI: str = "mongodb://localhost:27017"
     DB_NAME: str = "stc-db"
+    
+    # Performance settings
+    ENABLE_QUERY_CACHE: bool = True
+    QUERY_CACHE_TTL: int = 300  # 5 minutes
+    MAX_PAGE_SIZE: int = 500
+    DEFAULT_PAGE_SIZE: int = 50
 
     # JWT
     JWT_SECRET_KEY: str
@@ -54,6 +60,12 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "logs/app.log"
+    
+    # Performance & Caching
+    ENABLE_QUERY_CACHE: bool = True
+    CACHE_TTL: int = 300  # 5 minutes
+    MAX_PAGE_SIZE: int = 500
+    DEFAULT_PAGE_SIZE: int = 50
 
     class Config:
         env_file = ".env"

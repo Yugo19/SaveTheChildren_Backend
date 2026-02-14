@@ -246,11 +246,32 @@ class DataLoaderService:
     def _convert_row_to_document(self, row) -> Dict:
         """
         Convert a DataFrame row to a MongoDB document
-        Customize this method based on your parquet file structure
+        Handles date normalization and field name mapping for API compatibility
         """
         import pandas as pd
+        from datetime import datetime as dt
+        import re
+        
+        # Field name mapping from CSV columns to API field names
+        field_mapping = {
+            'Case Date': 'case_date',
+            'Sex': 'sex',
+            'Age Range': 'age_range',
+            'Case Category': 'abuse_type',
+            'No. of Cases': 'no_of_cases',
+            'County': 'county',
+            'Sub County': 'subcounty',
+            'Intervention': 'intervention',
+            'Year': 'year',
+            'Month': 'month',
+            'MonthName': 'month_name',
+            '#': 'case_id'
+        }
         
         doc = {}
+        
+        # Date fields that need normalization
+        date_fields = ['case_date', 'Case Date', 'Date', 'incident_date', 'report_date', 'date_reported']
         
         # Convert all fields from the row
         for column in row.index:
@@ -260,21 +281,50 @@ class DataLoaderService:
             if pd.isna(value):
                 continue
             
+            # Map column name to API field name
+            target_field = field_mapping.get(column, column.lower().replace(' ', '_'))
+            
             # Handle datetime columns
             if pd.api.types.is_datetime64_any_dtype(type(value)):
-                doc[column] = pd.to_datetime(value).to_pydatetime()
+                # Convert pandas datetime to Python datetime
+                py_datetime = pd.to_datetime(value).to_pydatetime()
+                # Store as normalized string for consistent filtering
+                doc[target_field] = py_datetime.strftime('%Y-%m-%d %H:%M:%S')
+            # Handle date fields that come as strings (from CSV)
+            elif column in date_fields or column.lower() in [f.lower() for f in date_fields]:
+                try:
+                    # Try to parse various date formats
+                    date_str = str(value).strip()
+                    
+                    # Try common formats
+                    for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%Y/%m/%d', 
+                               '%Y-%m-%d %H:%M:%S', '%d-%m-%Y', '%m-%d-%Y']:
+                        try:
+                            parsed_date = dt.strptime(date_str, fmt)
+                            # Normalize to consistent format
+                            doc[target_field] = parsed_date.strftime('%Y-%m-%d %H:%M:%S')
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        # If parsing failed, store as-is but log warning
+                        logger.warning(f"Could not parse date field {column}: {value}")
+                        doc[target_field] = str(value)
+                except Exception as e:
+                    logger.warning(f"Error processing date field {column}: {e}")
+                    doc[target_field] = str(value)
             # Handle numeric types
             elif isinstance(value, (int, float)):
                 if isinstance(value, float) and value.is_integer():
-                    doc[column] = int(value)
+                    doc[target_field] = int(value)
                 else:
-                    doc[column] = value
+                    doc[target_field] = value
             # Handle strings
             else:
-                doc[column] = str(value)
+                doc[target_field] = str(value)
         
         # Add metadata fields
-        doc['source'] = 'parquet_import'
+        doc['source'] = 'csv_import'
         doc['created_at'] = datetime.now(timezone.utc)
         doc['updated_at'] = datetime.now(timezone.utc)
         

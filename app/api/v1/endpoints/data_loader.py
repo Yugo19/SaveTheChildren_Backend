@@ -1,10 +1,13 @@
-from fastapi import APIRouter, Depends, Query, HTTPException, status
+from fastapi import APIRouter, Depends, Query, HTTPException, status, UploadFile, File, Form
 from typing import Optional
 from app.db.client import get_database
 from app.core.security import get_current_user, TokenData
 from app.services.data_loader_service import DataLoaderService
 from app.core.logging import logger
 from pydantic import BaseModel
+import tempfile
+import shutil
+from pathlib import Path
 
 
 router = APIRouter(prefix="/data-loader", tags=["Data Loader"])
@@ -20,6 +23,140 @@ class LoadSingleFileRequest(BaseModel):
     file_name: str
     batch_size: int = 1000
     skip_duplicates: bool = True
+
+
+@router.post("/upload/parquet")
+async def upload_parquet_file(
+    file: UploadFile = File(..., description="Parquet file to upload and import"),
+    batch_size: int = Form(1000),
+    skip_duplicates: bool = Form(True),
+    current_user: TokenData = Depends(get_current_user),
+    db=Depends(get_database)
+):
+    """
+    Upload and import a parquet file into cases collection
+    Requires admin role
+    """
+    # Check if user is admin
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can import data"
+        )
+    
+    # Validate file extension
+    if not file.filename.endswith('.parquet'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be a .parquet file"
+        )
+    
+    # Create temporary file to store upload
+    temp_file = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.parquet') as temp_file:
+            shutil.copyfileobj(file.file, temp_file)
+            temp_file_path = temp_file.name
+        
+        # Load the file
+        loader = DataLoaderService(db)
+        results = await loader.load_parquet_file(
+            temp_file_path,
+            batch_size=batch_size,
+            skip_duplicates=skip_duplicates
+        )
+        
+        logger.info(f"Parquet file '{file.filename}' imported by {current_user.user_id}")
+        return {
+            "status": "success",
+            "message": f"Parquet file '{file.filename}' imported successfully",
+            "results": results
+        }
+    except ImportError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Missing required dependencies: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Error uploading parquet file: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error uploading file: {str(e)}"
+        )
+    finally:
+        # Clean up temporary file
+        if temp_file and Path(temp_file_path).exists():
+            try:
+                Path(temp_file_path).unlink()
+            except Exception as e:
+                logger.warning(f"Failed to delete temporary file: {e}")
+
+
+@router.post("/upload/csv")
+async def upload_csv_file(
+    file: UploadFile = File(..., description="CSV file to upload and import"),
+    batch_size: int = Form(1000),
+    skip_duplicates: bool = Form(True),
+    current_user: TokenData = Depends(get_current_user),
+    db=Depends(get_database)
+):
+    """
+    Upload and import a CSV file into cases collection
+    Requires admin role
+    """
+    # Check if user is admin
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can import data"
+        )
+    
+    # Validate file extension
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be a .csv file"
+        )
+    
+    # Create temporary file to store upload
+    temp_file = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as temp_file:
+            shutil.copyfileobj(file.file, temp_file)
+            temp_file_path = temp_file.name
+        
+        # Load the file
+        loader = DataLoaderService(db)
+        results = await loader.load_csv_file(
+            temp_file_path,
+            batch_size=batch_size,
+            skip_duplicates=skip_duplicates
+        )
+        
+        logger.info(f"CSV file '{file.filename}' imported by {current_user.user_id}")
+        return {
+            "status": "success",
+            "message": f"CSV file '{file.filename}' imported successfully",
+            "results": results
+        }
+    except ImportError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Missing required dependencies: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Error uploading CSV file: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error uploading file: {str(e)}"
+        )
+    finally:
+        # Clean up temporary file
+        if temp_file and Path(temp_file_path).exists():
+            try:
+                Path(temp_file_path).unlink()
+            except Exception as e:
+                logger.warning(f"Failed to delete temporary file: {e}")
 
 
 @router.post("/load/parquet")

@@ -3,7 +3,7 @@ from typing import Optional
 from pydantic import BaseModel
 from app.db.client import get_database
 from app.services.file_service import FileService
-from app.core.security import get_current_user, TokenData
+from app.core.security import admin_required, TokenData, get_current_user
 from app.core.logging import logger
 
 router = APIRouter(prefix="/files", tags=["Files"])
@@ -22,10 +22,10 @@ async def upload_file(
     file: UploadFile = File(...),
     file_type: str = Query(...),
     description: Optional[str] = None,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(admin_required),
     db=Depends(get_database)
 ):
-    """Upload file, chunk it, and index in Pinecone for RAG"""
+    """Upload file, chunk it, and index in PostgreSQL vector database for RAG (Admin only)"""
     try:
         # Validate file type
         allowed_types = ["csv", "xlsx", "pdf", "json", "txt", "doc", "docx"]
@@ -113,7 +113,7 @@ async def get_file_info(
         "chunk_count": file_doc.get("chunk_count", 0),
         "upload_date": file_doc["upload_date"],
         "description": file_doc.get("description", ""),
-        "indexed_in_pinecone": file_doc.get("indexed_in_pinecone", False)
+        "indexed_in_vector_db": file_doc.get("indexed_in_vector_db", False)
     }
 
 
@@ -147,20 +147,11 @@ async def download_file(
 @router.delete("/{file_id}")
 async def delete_file(
     file_id: str,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(admin_required),
     db=Depends(get_database)
 ):
-    """Delete file (owner or admin)"""
+    """Delete file (Admin only)"""
     file_service = FileService(db)
-    file_doc = await file_service.get_file(file_id)
-
-    # Check ownership
-    if str(file_doc["uploaded_by"]) != current_user.user_id and current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot delete file uploaded by another user"
-        )
-
     await file_service.delete_file(file_id)
     logger.info(f"File deleted by {current_user.user_id}: {file_id}")
 
