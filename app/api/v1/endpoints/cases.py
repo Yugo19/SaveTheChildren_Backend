@@ -12,6 +12,22 @@ from app.utils.date_filters import build_date_filter
 router = APIRouter(prefix="/cases", tags=["Cases"])
 
 
+def _prepare_case_response(case: dict) -> dict:
+    """Prepare case document for CaseResponse model validation"""
+    # Convert _id to string
+    case["_id"] = str(case["_id"])
+    
+    # Ensure case_id is string
+    if "case_id" in case and not isinstance(case["case_id"], str):
+        case["case_id"] = str(case["case_id"])
+    
+    # Provide default severity if missing
+    if "severity" not in case or case["severity"] is None:
+        case["severity"] = "unknown"
+    
+    return case
+
+
 @router.post("", response_model=CaseResponse, status_code=201)
 async def create_case(
     case_data: CaseCreate,
@@ -35,7 +51,7 @@ async def create_case(
     case_doc["_id"] = result.inserted_id
 
     logger.info(f"Case created: {case_doc.get('case_id')}")
-    return CaseResponse(**{**case_doc, "_id": str(case_doc["_id"])})
+    return CaseResponse(**_prepare_case_response(case_doc))
 
 
 @router.get("", response_model=dict)
@@ -159,21 +175,38 @@ async def get_case(
     db=Depends(get_database)
 ):
     """Get single case by ID (All authenticated users)"""
+    logger.info(f"Attempting to retrieve case: {case_id}")
+    
+    # Try to find by MongoDB _id first
     try:
         case = await db.cases.find_one({"_id": ObjectId(case_id)})
-    except:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid case ID"
-        )
-
+        if case:
+            logger.info(f"Case found by ObjectId: {case_id}")
+            case.pop("child_age", None)
+            return _prepare_case_response(case)
+    except Exception as e:
+        logger.debug(f"Failed to find by ObjectId: {e}")
+    
+    # If not found or invalid ObjectId, try to find by case_id field as string
+    logger.info(f"Trying to find case by case_id field (string): {case_id}")
+    case = await db.cases.find_one({"case_id": case_id})
+    
     if not case:
+        # Try as integer if the case_id is numeric
+        if case_id.isdigit():
+            logger.info(f"Trying to find case by case_id field (integer): {case_id}")
+            case = await db.cases.find_one({"case_id": int(case_id)})
+    
+    if not case:
+        logger.warning(f"Case not found with ObjectId, string case_id, or int case_id: {case_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Case not found"
         )
 
-    return CaseResponse(**{**case, "_id": str(case["_id"])})
+    logger.info(f"Case found by case_id field: {case_id}")
+    case.pop("child_age", None)
+    return _prepare_case_response(case)
 
 
 @router.put("/{case_id}", response_model=CaseResponse)
@@ -184,12 +217,30 @@ async def update_case(
     db=Depends(get_database)
 ):
     """Update case (Admin & Member only)"""
+    # Try to find by MongoDB _id or case_id field
+    case_query = None
+    existing_case = None
+    
     try:
-        case_id_obj = ObjectId(case_id)
+        case_query = {"_id": ObjectId(case_id)}
+        existing_case = await db.cases.find_one(case_query)
     except:
+        pass
+    
+    if not existing_case:
+        # Try by case_id as string
+        case_query = {"case_id": case_id}
+        existing_case = await db.cases.find_one(case_query)
+    
+    if not existing_case and case_id.isdigit():
+        # Try by case_id as integer
+        case_query = {"case_id": int(case_id)}
+        existing_case = await db.cases.find_one(case_query)
+    
+    if not existing_case:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid case ID"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Case not found"
         )
 
     update_data = case_update.dict(exclude_unset=True)
@@ -197,20 +248,14 @@ async def update_case(
 
     if update_data:
         await db.cases.update_one(
-            {"_id": case_id_obj},
+            case_query,
             {"$set": update_data}
         )
     
-    result = await db.cases.find_one({"_id": case_id_obj})
-
-    if not result:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Case not found"
-        )
+    result = await db.cases.find_one(case_query)
 
     logger.info(f"Case updated: {case_id}")
-    return CaseResponse(**{**result, "_id": str(result["_id"])})
+    return CaseResponse(**_prepare_case_response(result))
 
 
 @router.delete("/{case_id}")
@@ -220,15 +265,25 @@ async def delete_case(
     db=Depends(get_database)
 ):
     """Delete case (Admin only)"""
+    # Try to find by MongoDB _id or case_id field
+    case_query = None
     try:
-        case_id_obj = ObjectId(case_id)
+        case_query = {"_id": ObjectId(case_id)}
+        result = await db.cases.delete_one(case_query)
+        if result.deleted_count > 0:
+            logger.info(f"Case deleted: {case_id}")
+            return {"message": "Case deleted successfully"}
     except:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid case ID"
-        )
-
-    result = await db.cases.delete_one({"_id": case_id_obj})
+        pass
+    
+    # Try by case_id as string
+    case_query = {"case_id": case_id}
+    result = await db.cases.delete_one(case_query)
+    
+    if result.deleted_count == 0 and case_id.isdigit():
+        # Try by case_id as integer
+        case_query = {"case_id": int(case_id)}
+        result = await db.cases.delete_one(case_query)
 
     if result.deleted_count == 0:
         raise HTTPException(

@@ -58,8 +58,8 @@ class DataLoaderService:
             
             for _, row in batch.iterrows():
                 try:
-                    # Convert row to document
-                    doc = self._convert_row_to_document(row)
+                    # Convert row to document (parquet source)
+                    doc = self._convert_row_to_document(row, source='parquet_import')
                     
                     if skip_duplicates and doc.get('case_id'):
                         # Check if case_id already exists
@@ -195,8 +195,8 @@ class DataLoaderService:
             
             for _, row in batch.iterrows():
                 try:
-                    # Convert row to document
-                    doc = self._convert_row_to_document(row)
+                    # Convert row to document (CSV source)
+                    doc = self._convert_row_to_document(row, source='csv_import')
                     
                     if skip_duplicates and doc.get('case_id'):
                         # Check if case_id already exists
@@ -243,10 +243,15 @@ class DataLoaderService:
         logger.info(f"Load complete: {stats}")
         return stats
     
-    def _convert_row_to_document(self, row) -> Dict:
+    def _convert_row_to_document(self, row, source: str = 'csv_import') -> Dict:
         """
         Convert a DataFrame row to a MongoDB document
         Handles date normalization and field name mapping for API compatibility
+        Ensures case_id is always stored as string for consistency
+        
+        Args:
+            row: DataFrame row to convert
+            source: Source of the data (e.g., 'csv_import', 'parquet_import')
         """
         import pandas as pd
         from datetime import datetime as dt
@@ -255,7 +260,7 @@ class DataLoaderService:
         # Field name mapping from CSV columns to API field names
         field_mapping = {
             'Case Date': 'case_date',
-            'Sex': 'sex',
+            'Sex': 'child_sex',
             'Age Range': 'age_range',
             'Case Category': 'abuse_type',
             'No. of Cases': 'no_of_cases',
@@ -315,16 +320,29 @@ class DataLoaderService:
                     doc[target_field] = str(value)
             # Handle numeric types
             elif isinstance(value, (int, float)):
-                if isinstance(value, float) and value.is_integer():
+                # Special handling for case_id - always convert to string
+                if target_field == 'case_id':
+                    doc[target_field] = str(int(value))
+                elif isinstance(value, float) and value.is_integer():
                     doc[target_field] = int(value)
                 else:
                     doc[target_field] = value
             # Handle strings
             else:
-                doc[target_field] = str(value)
+                # Ensure case_id is always string type
+                if target_field == 'case_id':
+                    doc[target_field] = str(value).strip()
+                else:
+                    doc[target_field] = str(value)
+        
+        # Convert age_range to child_age (integer)
+        if 'age_range' in doc:
+            age_range_str = doc['age_range']
+            doc['child_age'] = self._parse_age_range(age_range_str)
+            # Keep age_range for reference but child_age is the primary field
         
         # Add metadata fields
-        doc['source'] = 'csv_import'
+        doc['source'] = source
         doc['created_at'] = datetime.now(timezone.utc)
         doc['updated_at'] = datetime.now(timezone.utc)
         
@@ -332,7 +350,34 @@ class DataLoaderService:
         if 'status' not in doc:
             doc['status'] = 'open'
         
+        # Final validation: Ensure case_id is string if it exists
+        if 'case_id' in doc and not isinstance(doc['case_id'], str):
+            doc['case_id'] = str(doc['case_id'])
+        
         return doc
+    
+    def _parse_age_range(self, age_range_str: str) -> Optional[int]:
+        """
+        Parse age range string to approximate integer age
+        Examples: '0 - 5 yrs' -> 3, '6 - 11 yrs' -> 9, '16 - 18 yrs' -> 17, '18+ yrs' -> 18
+        """
+        import re
+        
+        # Extract numbers from string like "16 - 18 yrs" or "18+ yrs"
+        numbers = re.findall(r'\d+', str(age_range_str))
+        
+        if not numbers:
+            return None
+        
+        # Convert to integers
+        ages = [int(n) for n in numbers]
+        
+        if len(ages) == 1:
+            # Single age or "18+" -> use that age (cap at 18)
+            return min(ages[0], 18)
+        else:
+            # Range like "16 - 18" -> use midpoint
+            return (ages[0] + ages[1]) // 2
     
     async def clear_collection(self, confirm: bool = False) -> Dict:
         """

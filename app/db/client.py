@@ -63,8 +63,8 @@ class MongoDBClient:
             # Demographics compound index
             await self.db.cases.create_index([("county", ASCENDING), ("sex", ASCENDING), ("age_range", ASCENDING)], background=True)
             
-            # Sparse index for case_id (not all docs have it)
-            await self.db.cases.create_index([("case_id", ASCENDING)], sparse=True, background=True)
+            # Unique sparse index for case_id (not all docs have it, but when present must be unique)
+            await self.db.cases.create_index([("case_id", ASCENDING)], unique=True, sparse=True, background=True)
 
             logger.info("Database indexes ensured (background mode)")
         except Exception as e:

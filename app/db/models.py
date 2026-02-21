@@ -20,6 +20,7 @@ class SeverityLevel(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+    UNKNOWN = "unknown"
 
 
 # User Schemas
@@ -64,9 +65,17 @@ class CaseResponse(BaseModel):
     case_id: str
     case_date: datetime
     county: str
+    subcounty: Optional[str] = None
+    child_age: Optional[int] = None
+    age_range: Optional[str] = None
+    child_sex: Optional[str] = None
     abuse_type: str
+    description: Optional[str] = None
+    intervention: Optional[str] = None
     status: CaseStatus
     severity: SeverityLevel
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     created_at: datetime
     updated_at: datetime
 

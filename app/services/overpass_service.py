@@ -2,8 +2,11 @@ from typing import List, Dict, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 import aiohttp
 import asyncio
+import json
 from app.core.logging import logger
 from fastapi import HTTPException, status
+from datetime import datetime, timedelta
+from app.db.redis_client import get_redis
 
 
 class OverpassService:
@@ -15,18 +18,57 @@ class OverpassService:
         "https://overpass.kumi.systems/api/interpreter",     # Switzerland
         "https://overpass.openstreetmap.ru/api/interpreter", # Russia
         "https://overpass.openstreetmap.fr/api/interpreter", # France
+        "https://z.overpass-api.de/api/interpreter",         # Germany (alternative)
+        "https://lz4.overpass-api.de/api/interpreter",       # Germany (compressed)
     ]
     
     # Kenya bounding box coordinates [south, west, north, east]
     KENYA_BBOX = [-4.67, 33.83, 5.51, 41.86]
     
+    # Cache TTL: 4 weeks
+    CACHE_TTL_SECONDS = 60 * 60 * 24 * 28  # 4 weeks in seconds
+    
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
         self.cases_collection = db.cases
         self.current_server_index = 0
+        self.redis = get_redis()
+    
+    def _get_cache_key(self, query_type: str, county: Optional[str] = None) -> str:
+        """Generate cache key for query"""
+        return f"overpass:{query_type}:{county or 'all'}"
+    
+    async def _get_from_cache(self, cache_key: str) -> Optional[Dict]:
+        """Get cached result from Redis if still valid"""
+        try:
+            cached_json = await self.redis.get(cache_key)
+            if cached_json:
+                logger.info(f"Returning cached result for: {cache_key}")
+                return json.loads(cached_json)
+        except Exception as e:
+            logger.warning(f"Cache read error: {str(e)}")
+        return None
+    
+    async def _save_to_cache(self, cache_key: str, data: Dict):
+        """Save result to Redis cache"""
+        try:
+            await self.redis.setex(
+                cache_key, 
+                self.CACHE_TTL_SECONDS, 
+                json.dumps(data)
+            )
+            logger.info(f"Cached result for: {cache_key} (TTL: 4 weeks)")
+        except Exception as e:
+            logger.warning(f"Cache write error: {str(e)}")
     
     async def get_counties_from_db(self) -> List[Dict]:
         """Fetch unique counties from database with their geographic centers"""
+        # Check cache first
+        cache_key = self._get_cache_key("counties")
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         try:
             pipeline = [
                 {
@@ -68,6 +110,9 @@ class OverpassService:
                 })
             
             logger.info(f"Fetched {len(counties)} counties from database")
+            
+            # Cache the result
+            await self._save_to_cache(cache_key, counties)
             return counties
             
         except Exception as e:
@@ -83,7 +128,7 @@ class OverpassService:
             try:
                 logger.info(f"Querying Overpass API server: {server_url} (attempt {attempt + 1}/{len(self.OVERPASS_SERVERS)})")
                 
-                timeout = aiohttp.ClientTimeout(total=60)
+                timeout = aiohttp.ClientTimeout(total=30, connect=5)
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(
                         server_url,
@@ -125,7 +170,7 @@ class OverpassService:
     def build_police_query(self, bbox: List[float]) -> str:
         """Build Overpass QL query for police stations"""
         south, west, north, east = bbox
-        query = f"""[out:json][timeout:60];
+        query = f"""[out:json][timeout:25];
 (
   node["amenity"="police"]({south},{west},{north},{east});
   way["amenity"="police"]({south},{west},{north},{east});
@@ -137,7 +182,7 @@ out center;
     def build_ngo_query(self, bbox: List[float]) -> str:
         """Build Overpass QL query for NGOs and child protection facilities"""
         south, west, north, east = bbox
-        query = f"""[out:json][timeout:60];
+        query = f"""[out:json][timeout:25];
 (
   node["amenity"="social_facility"]({south},{west},{north},{east});
   way["amenity"="social_facility"]({south},{west},{north},{east});
@@ -154,6 +199,12 @@ out center;
     
     async def get_police_stations(self, county: Optional[str] = None) -> Dict:
         """Get all police stations in Kenya or a specific county"""
+        # Check cache first
+        cache_key = self._get_cache_key("police", county)
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         counties = await self.get_counties_from_db()
         
         if county:
@@ -169,10 +220,20 @@ out center;
         
         query = self.build_police_query(bbox)
         result = await self.query_overpass(query)
-        return self._format_response(result, "police_stations", county)
+        formatted = self._format_response(result, "police_stations", county)
+        
+        # Cache the result
+        await self._save_to_cache(cache_key, formatted)
+        return formatted
     
     async def get_child_protection_ngos(self, county: Optional[str] = None) -> Dict:
         """Get NGOs working for child protection in Kenya or a specific county"""
+        # Check cache first
+        cache_key = self._get_cache_key("ngos", county)
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         counties = await self.get_counties_from_db()
         
         if county:
@@ -188,7 +249,11 @@ out center;
         
         query = self.build_ngo_query(bbox)
         result = await self.query_overpass(query)
-        return self._format_response(result, "child_protection_ngos", county)
+        formatted = self._format_response(result, "child_protection_ngos", county)
+        
+        # Cache the result
+        await self._save_to_cache(cache_key, formatted)
+        return formatted
     
     async def get_all_amenities(self, county: Optional[str] = None) -> Dict:
         """Get both police stations and NGOs in Kenya or a specific county"""
@@ -206,6 +271,12 @@ out center;
     
     async def get_amenities_by_all_counties(self) -> Dict:
         """Get child protection amenities grouped by all Kenya counties"""
+        # Check cache first
+        cache_key = self._get_cache_key("all_counties")
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         counties = await self.get_counties_from_db()
         
         results = {}
@@ -224,11 +295,15 @@ out center;
             else:
                 results[county_name] = result
         
-        return {
+        response = {
             "country": "Kenya",
             "total_counties": len(counties),
             "counties": results
         }
+        
+        # Cache the result
+        await self._save_to_cache(cache_key, response)
+        return response
     
     async def _get_county_amenities(self, county_name: str) -> Dict:
         """Helper to get amenities for a single county"""

@@ -226,9 +226,12 @@ async def get_data_freshness(
             sort=[("fetched_at", -1)]
         )
         if latest_kenya:
+            fetched_at = latest_kenya["fetched_at"]
+            if fetched_at.tzinfo is None:
+                fetched_at = fetched_at.replace(tzinfo=timezone.utc)
             freshness["kenya_api"] = {
-                "last_update": latest_kenya["fetched_at"],
-                "age_hours": (datetime.now(timezone.utc) - latest_kenya["fetched_at"]).total_seconds() / 3600,
+                "last_update": fetched_at,
+                "age_hours": (datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600,
                 "record_count": latest_kenya.get("record_count", 0)
             }
         
@@ -238,9 +241,12 @@ async def get_data_freshness(
             sort=[("timestamp", -1)]
         )
         if latest_scrape:
+            timestamp = latest_scrape["timestamp"]
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
             freshness["web_scraping"] = {
-                "last_update": latest_scrape["timestamp"],
-                "age_hours": (datetime.now(timezone.utc) - latest_scrape["timestamp"]).total_seconds() / 3600
+                "last_update": timestamp,
+                "age_hours": (datetime.now(timezone.utc) - timestamp).total_seconds() / 3600
             }
         
         # Case reports
@@ -249,9 +255,12 @@ async def get_data_freshness(
             sort=[("created_at", -1)]
         )
         if latest_case:
+            created_at = latest_case["created_at"]
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
             freshness["cases"] = {
-                "last_update": latest_case["created_at"],
-                "age_hours": (datetime.now(timezone.utc) - latest_case["created_at"]).total_seconds() / 3600
+                "last_update": created_at,
+                "age_hours": (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
             }
         
         freshness["timestamp"] = datetime.now(timezone.utc)

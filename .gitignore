@@ -36,3 +36,6 @@ logs/
 *.csv
 *.txt
 *.sh
+*.parquet
+*.js
+*.html

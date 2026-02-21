@@ -5,12 +5,47 @@ from datetime import datetime
 from app.core.logging import logger
 from app.utils.severity_mapping import get_severity_aggregation_stage
 from typing import Optional, Tuple
+from app.db.redis_client import get_redis
+import json
+import hashlib
 
 
 class GeospatialService:
+    CACHE_TTL_SECONDS = 60 * 60 * 4  # 4 hours
+    
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
         self.cases_collection = db.cases
+        self.redis = get_redis()
+    
+    def _get_cache_key(self, method: str, **kwargs) -> str:
+        """Generate cache key based on method and parameters"""
+        params_str = json.dumps(kwargs, sort_keys=True)
+        params_hash = hashlib.md5(params_str.encode()).hexdigest()
+        return f"geospatial:{method}:{params_hash}"
+    
+    async def _get_from_cache(self, cache_key: str) -> Optional[dict]:
+        """Get cached result from Redis"""
+        try:
+            cached_json = await self.redis.get(cache_key)
+            if cached_json:
+                logger.info(f"Returning cached result for: {cache_key}")
+                return json.loads(cached_json)
+        except Exception as e:
+            logger.warning(f"Cache read error: {str(e)}")
+        return None
+    
+    async def _save_to_cache(self, cache_key: str, data: dict):
+        """Save result to Redis cache"""
+        try:
+            await self.redis.setex(
+                cache_key,
+                self.CACHE_TTL_SECONDS,
+                json.dumps(data)
+            )
+            logger.info(f"Cached result for: {cache_key} (TTL: 4 hours)")
+        except Exception as e:
+            logger.warning(f"Cache write error: {str(e)}")
 
     async def get_nearby_cases(
         self,
@@ -19,6 +54,12 @@ class GeospatialService:
         radius_km: float = 10
     ):
         """Get cases near a specific location"""
+        # Check cache first
+        cache_key = self._get_cache_key("nearby", latitude=latitude, longitude=longitude, radius_km=radius_km)
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         try:
             # Convert radius to degrees (approximate)
             radius_degrees = radius_km / 111.0
@@ -42,7 +83,7 @@ class GeospatialService:
             
             logger.info(f"Nearby cases retrieved for location {latitude}, {longitude}")
             
-            return {
+            result = {
                 "latitude": latitude,
                 "longitude": longitude,
                 "radius_km": radius_km,
@@ -59,12 +100,22 @@ class GeospatialService:
                     for c in results
                 ]
             }
+            
+            # Cache the result
+            await self._save_to_cache(cache_key, result)
+            return result
         except Exception as e:
             logger.error(f"Error getting nearby cases: {e}")
             raise
 
     async def get_hotspots(self, radius_km: float = 5):
         """Get case hotspots/clusters"""
+        # Check cache first
+        cache_key = self._get_cache_key("hotspots", radius_km=radius_km)
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         try:
             severity_expr = get_severity_aggregation_stage()
             
@@ -98,7 +149,7 @@ class GeospatialService:
             
             logger.info("Hotspots retrieved")
             
-            return {
+            result = {
                 "hotspots": [
                     {
                         "latitude": h["_id"]["latitude"],
@@ -110,12 +161,22 @@ class GeospatialService:
                     for h in results
                 ]
             }
+            
+            # Cache the result
+            await self._save_to_cache(cache_key, result)
+            return result
         except Exception as e:
             logger.error(f"Error getting hotspots: {e}")
             raise
 
     async def get_county_boundaries(self, source: Optional[str] = None):
         """Get case statistics by county with geographic info"""
+        # Check cache first
+        cache_key = self._get_cache_key("county_boundaries", source=source)
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         try:
             severity_expr = get_severity_aggregation_stage()
             
@@ -148,7 +209,7 @@ class GeospatialService:
             
             logger.info("County boundaries retrieved")
             
-            return {
+            result = {
                 "counties": [
                     {
                         "county": c["_id"],
@@ -162,6 +223,10 @@ class GeospatialService:
                     for c in results
                 ]
             }
+            
+            # Cache the result
+            await self._save_to_cache(cache_key, result)
+            return result
         except Exception as e:
             logger.error(f"Error getting county boundaries: {e}")
             raise
@@ -173,6 +238,12 @@ class GeospatialService:
         source: Optional[str] = None
     ):
         """Get heatmap data for visualization"""
+        # Check cache first
+        cache_key = self._get_cache_key("heatmap", county=county, abuse_type=abuse_type, source=source)
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         try:
             filters = {
                 "latitude": {"$exists": True, "$ne": None},
@@ -215,7 +286,7 @@ class GeospatialService:
             
             logger.info(f"Heatmap data retrieved ({len(heatmap_points)} points)")
             
-            return {
+            result = {
                 "total_points": len(heatmap_points),
                 "filters": {
                     "county": county,
@@ -224,12 +295,22 @@ class GeospatialService:
                 },
                 "points": heatmap_points
             }
+            
+            # Cache the result
+            await self._save_to_cache(cache_key, result)
+            return result
         except Exception as e:
             logger.error(f"Error getting heatmap data: {e}")
             raise
 
     async def get_case_density(self, zoom_level: int = 10):
         """Get case density grid"""
+        # Check cache first
+        cache_key = self._get_cache_key("density", zoom_level=zoom_level)
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         try:
             severity_expr = get_severity_aggregation_stage()
             
@@ -272,7 +353,7 @@ class GeospatialService:
             
             logger.info("Case density retrieved")
             
-            return {
+            result = {
                 "zoom_level": zoom_level,
                 "grid_size": grid_size,
                 "density_cells": [
@@ -285,6 +366,10 @@ class GeospatialService:
                     for d in results
                 ]
             }
+            
+            # Cache the result
+            await self._save_to_cache(cache_key, result)
+            return result
         except Exception as e:
             logger.error(f"Error getting case density: {e}")
             raise
@@ -298,6 +383,12 @@ class GeospatialService:
         format: str = "geojson"
     ):
         """Get map data in GeoJSON or simple format for visualization"""
+        # Check cache first
+        cache_key = self._get_cache_key("map_data", county=county, abuse_type=abuse_type, year=year, source=source, format=format)
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         try:
             # Build query filters
             filters = {}
@@ -383,7 +474,7 @@ class GeospatialService:
             logger.info(f"Map data retrieved ({len(map_points)} locations)")
             
             if format == "geojson":
-                return {
+                result = {
                     "type": "FeatureCollection",
                     "features": geojson_features,
                     "metadata": {
@@ -399,7 +490,7 @@ class GeospatialService:
                 }
             else:
                 # Simple format
-                return {
+                result = {
                     "points": map_points,
                     "total_locations": len(map_points),
                     "total_cases": sum(p["case_count"] for p in map_points),
@@ -410,6 +501,10 @@ class GeospatialService:
                         "source": source
                     }
                 }
+            
+            # Cache the result
+            await self._save_to_cache(cache_key, result)
+            return result
         except Exception as e:
             logger.error(f"Error getting map data: {e}")
             raise

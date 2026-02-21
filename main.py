@@ -1,12 +1,15 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from starlette.middleware.gzip import GZipMiddleware
 from app.api.v1.router import router as api_v1_router
 from app.core.exceptions import setup_exception_handlers
 from app.core.logging import logger
 from app.db.client import mongodb_client
+from app.db.redis_client import redis_client
 from app.config import settings
+import os
 
 
 @asynccontextmanager
@@ -14,6 +17,9 @@ async def lifespan(app: FastAPI):
     logger.info("Starting FastAPI application...")
     await mongodb_client.connect()
     logger.info("MongoDB connected successfully")
+    
+    await redis_client.connect()
+    logger.info("Redis connected successfully")
     
     # Start background tasks
     from app.tasks.scheduler import start_background_tasks
@@ -25,6 +31,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down FastAPI application...")
     await mongodb_client.disconnect()
     logger.info("MongoDB disconnected")
+    await redis_client.disconnect()
+    logger.info("Redis disconnected")
 
 
 app = FastAPI(
@@ -55,6 +63,24 @@ async def health_check():
         "status": "healthy",
         "version": settings.API_VERSION
     }
+
+
+@app.get("/sse_demo.html")
+async def sse_demo():
+    """Serve SSE demo HTML"""
+    file_path = os.path.join(os.path.dirname(__file__), "sse_demo.html")
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
+    return {"error": "Demo file not found"}
+
+
+@app.get("/websocket_demo.html")
+async def websocket_demo():
+    """Serve WebSocket demo HTML (legacy)"""
+    file_path = os.path.join(os.path.dirname(__file__), "websocket_demo.html")
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
+    return {"error": "Demo file not found"}
 
 
 if __name__ == "__main__":

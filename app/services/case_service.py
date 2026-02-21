@@ -5,24 +5,56 @@ from bson import ObjectId
 from datetime import datetime, timezone
 from app.db.models import CaseStatus, SeverityLevel
 from app.core.logging import logger
-from app.core.cache import cache
 from app.config import settings
 from app.utils.severity_mapping import get_severity_aggregation_stage
 from app.utils.date_filters import build_date_filter
 from app.services.geocoding_service import GeocodingService
+from app.db.redis_client import get_redis
 import hashlib
 import json
 
 
 class CaseService:
+    CACHE_TTL_SECONDS = 60 * 60 * 4  # 4 hours
+    
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
         self.cases_collection = db.cases
         self.kenya_data_collection = db.kenya_api_data
         self.geocoding_service = GeocodingService()
+        self.redis = get_redis()
         self._kenya_metadata_cache = None
         self._kenya_metadata_cache_time = None
         self._cache_ttl = 300  # 5 minutes cache
+    
+    def _get_cache_key(self, method: str, **kwargs) -> str:
+        """Generate cache key based on method and parameters"""
+        params_str = json.dumps(kwargs, sort_keys=True)
+        params_hash = hashlib.md5(params_str.encode()).hexdigest()
+        return f"cases:{method}:{params_hash}"
+    
+    async def _get_from_cache(self, cache_key: str) -> Optional[dict]:
+        """Get cached result from Redis"""
+        try:
+            cached_json = await self.redis.get(cache_key)
+            if cached_json:
+                logger.info(f"Returning cached result for: {cache_key}")
+                return json.loads(cached_json)
+        except Exception as e:
+            logger.warning(f"Cache read error: {str(e)}")
+        return None
+    
+    async def _save_to_cache(self, cache_key: str, data: dict):
+        """Save result to Redis cache"""
+        try:
+            await self.redis.setex(
+                cache_key,
+                self.CACHE_TTL_SECONDS,
+                json.dumps(data, default=str)
+            )
+            logger.info(f"Cached result for: {cache_key} (TTL: 4 hours)")
+        except Exception as e:
+            logger.warning(f"Cache write error: {str(e)}")
 
     async def create_case(self, case_data: dict, user_id: str):
         """Create a new case with automatic geocoding"""
@@ -57,7 +89,21 @@ class CaseService:
     async def get_case_by_id(self, case_id: str):
         """Get case by ID"""
         try:
-            case = await self.cases_collection.find_one({"_id": ObjectId(case_id)})
+            # Try to find by MongoDB _id first
+            try:
+                case = await self.cases_collection.find_one({"_id": ObjectId(case_id)})
+                if case:
+                    return case
+            except:
+                pass
+            
+            # Try by case_id field as string
+            case = await self.cases_collection.find_one({"case_id": case_id})
+            
+            # Try by case_id as integer if string search failed and case_id is numeric
+            if not case and case_id.isdigit():
+                case = await self.cases_collection.find_one({"case_id": int(case_id)})
+            
             if not case:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -83,27 +129,24 @@ class CaseService:
     ):
         """List cases with filtering and pagination, optionally including Kenya API data"""
         
-        # Generate cache key for this query
-        cache_key = None
-        if settings.ENABLE_QUERY_CACHE and not include_kenya_data and not auto_sync_kenya:
-            cache_params = {
-                'page': page,
-                'limit': limit,
-                'county': county,
-                'abuse_type': abuse_type,
-                'status': status_filter,
-                'severity': severity,
-                'date_from': date_from,
-                'date_to': date_to
-            }
-            cache_key_str = f"cases_list:{json.dumps(cache_params, sort_keys=True)}"
-            cache_key = hashlib.md5(cache_key_str.encode()).hexdigest()
-            
-            # Try to get from cache
-            cached_result = cache.get(cache_key)
-            if cached_result:
-                logger.debug(f"Cache hit for cases list query")
-                return cached_result
+        # Check cache first (skip cache if requesting Kenya data or auto-sync)
+        if not include_kenya_data and not auto_sync_kenya:
+            cache_key = self._get_cache_key(
+                "list",
+                page=page,
+                limit=limit,
+                county=county,
+                abuse_type=abuse_type,
+                status=status_filter,
+                severity=severity,
+                date_from=date_from,
+                date_to=date_to
+            )
+            cached = await self._get_from_cache(cache_key)
+            if cached:
+                return cached
+        else:
+            cache_key = None
         
         # Auto-sync Kenya API data if requested and data is stale
         if auto_sync_kenya:
@@ -136,10 +179,17 @@ class CaseService:
                 {
                     "$project": {
                         "_id": {"$toString": "$_id"},
-                        "case_id": 1,
+                        "case_id": {
+                            "$cond": {
+                                "if": {"$eq": [{"$type": "$case_id"}, "string"]},
+                                "then": "$case_id",
+                                "else": {"$toString": "$case_id"}
+                            }
+                        },
                         "case_date": 1,
                         "county": 1,
                         "subcounty": 1,
+                        "sub_county": 1,
                         "abuse_type": 1,
                         "status": 1,
                         "severity": 1,
@@ -147,7 +197,21 @@ class CaseService:
                         "updated_at": 1,
                         "child_age": 1,
                         "child_sex": 1,
-                        "source": 1
+                        "age": 1,
+                        "age_range": 1,
+                        "Age Range": 1,
+                        "sex": 1,
+                        "Sex": 1,
+                        "victim_age": 1,
+                        "victim_age_range": 1,
+                        "victim_sex": 1,
+                        "source": 1,
+                        "description": 1,
+                        "intervention": 1,
+                        "latitude": 1,
+                        "longitude": 1,
+                        "location": 1,
+                        "created_by": 1
                     }
                 }
             ]
@@ -167,10 +231,17 @@ class CaseService:
                             {
                                 "$project": {
                                     "_id": {"$toString": "$_id"},
-                                    "case_id": 1,
+                                    "case_id": {
+                                        "$cond": {
+                                            "if": {"$eq": [{"$type": "$case_id"}, "string"]},
+                                            "then": "$case_id",
+                                            "else": {"$toString": "$case_id"}
+                                        }
+                                    },
                                     "case_date": 1,
                                     "county": 1,
                                     "subcounty": 1,
+                                    "sub_county": 1,
                                     "abuse_type": 1,
                                     "status": 1,
                                     "severity": 1,
@@ -178,7 +249,21 @@ class CaseService:
                                     "updated_at": 1,
                                     "child_age": 1,
                                     "child_sex": 1,
-                                    "source": 1
+                                    "age": 1,
+                                    "age_range": 1,
+                                    "Age Range": 1,
+                                    "sex": 1,
+                                    "Sex": 1,
+                                    "victim_age": 1,
+                                    "victim_age_range": 1,
+                                    "victim_sex": 1,
+                                    "source": 1,
+                                    "description": 1,
+                                    "intervention": 1,
+                                    "latitude": 1,
+                                    "longitude": 1,
+                                    "location": 1,
+                                    "created_by": 1
                                 }
                             }
                         ]
@@ -209,7 +294,7 @@ class CaseService:
         
         # Cache the result
         if cache_key:
-            cache.set(cache_key, result, ttl=settings.CACHE_TTL)
+            await self._save_to_cache(cache_key, result)
         
         return result
 
@@ -218,11 +303,37 @@ class CaseService:
         try:
             update_data["updated_at"] = datetime.now(timezone.utc)
 
+            # Try to find by MongoDB _id or case_id field
+            case_query = None
+            try:
+                case_query = {"_id": ObjectId(case_id)}
+                result = await self.cases_collection.find_one_and_update(
+                    case_query,
+                    {"$set": update_data},
+                    return_document=True
+                )
+                if result:
+                    logger.info(f"Case updated: {case_id}")
+                    return result
+            except:
+                pass
+
+            # Try by case_id as string
+            case_query = {"case_id": case_id}
             result = await self.cases_collection.find_one_and_update(
-                {"_id": ObjectId(case_id)},
+                case_query,
                 {"$set": update_data},
                 return_document=True
             )
+            
+            # Try by case_id as integer if string search failed
+            if not result and case_id.isdigit():
+                case_query = {"case_id": int(case_id)}
+                result = await self.cases_collection.find_one_and_update(
+                    case_query,
+                    {"$set": update_data},
+                    return_document=True
+                )
 
             if not result:
                 raise HTTPException(
@@ -239,7 +350,27 @@ class CaseService:
     async def delete_case(self, case_id: str):
         """Delete case"""
         try:
-            result = await self.cases_collection.delete_one({"_id": ObjectId(case_id)})
+            # Try to find by MongoDB _id or case_id field
+            case_query = None
+            result = None
+            
+            try:
+                case_query = {"_id": ObjectId(case_id)}
+                result = await self.cases_collection.delete_one(case_query)
+                if result.deleted_count > 0:
+                    logger.info(f"Case deleted: {case_id}")
+                    return True
+            except:
+                pass
+            
+            # Try by case_id as string
+            case_query = {"case_id": case_id}
+            result = await self.cases_collection.delete_one(case_query)
+            
+            # Try by case_id as integer if string search failed
+            if result.deleted_count == 0 and case_id.isdigit():
+                case_query = {"case_id": int(case_id)}
+                result = await self.cases_collection.delete_one(case_query)
 
             if result.deleted_count == 0:
                 raise HTTPException(
@@ -433,6 +564,15 @@ class CaseService:
     
     async def get_case_statistics(self, include_kenya: bool = True):
         """Get comprehensive case statistics including Kenya API data"""
+        # Check cache first (skip if including Kenya data)
+        if not include_kenya:
+            cache_key = self._get_cache_key("statistics", include_kenya=include_kenya)
+            cached = await self._get_from_cache(cache_key)
+            if cached:
+                return cached
+        else:
+            cache_key = None
+        
         try:
             pipeline = [
                 {
@@ -480,6 +620,10 @@ class CaseService:
             # Add Kenya API metadata if requested
             if include_kenya:
                 stats["kenya_api"] = await self._get_kenya_data_metadata()
+            
+            # Cache the result if not including Kenya data
+            if cache_key:
+                await self._save_to_cache(cache_key, stats)
             
             return stats
             

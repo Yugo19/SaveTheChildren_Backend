@@ -3,14 +3,49 @@ from datetime import datetime, timedelta, timezone
 from app.core.logging import logger
 from app.utils.severity_mapping import get_severity_aggregation_stage
 from app.utils.date_filters import build_date_filter
+from app.db.redis_client import get_redis
 from typing import Optional
+import hashlib
+import json
 
 
 class AnalyticsService:
+    CACHE_TTL_SECONDS = 60 * 60 * 4  # 4 hours
+    
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
         self.cases_collection = db.cases
+        self.redis = get_redis()
         self._date_field_cache = None
+    
+    def _get_cache_key(self, method: str, **kwargs) -> str:
+        """Generate cache key based on method and parameters"""
+        params_str = json.dumps(kwargs, sort_keys=True)
+        params_hash = hashlib.md5(params_str.encode()).hexdigest()
+        return f"analytics:{method}:{params_hash}"
+    
+    async def _get_from_cache(self, cache_key: str) -> Optional[dict]:
+        """Get cached result from Redis"""
+        try:
+            cached_json = await self.redis.get(cache_key)
+            if cached_json:
+                logger.info(f"Returning cached result for: {cache_key}")
+                return json.loads(cached_json)
+        except Exception as e:
+            logger.warning(f"Cache read error: {str(e)}")
+        return None
+    
+    async def _save_to_cache(self, cache_key: str, data: dict):
+        """Save result to Redis cache"""
+        try:
+            await self.redis.setex(
+                cache_key,
+                self.CACHE_TTL_SECONDS,
+                json.dumps(data, default=str)
+            )
+            logger.info(f"Cached result for: {cache_key} (TTL: 4 hours)")
+        except Exception as e:
+            logger.warning(f"Cache write error: {str(e)}")
     
     async def _get_date_field(self) -> str:
         """Detect which date field name is used in the database"""
@@ -37,6 +72,12 @@ class AnalyticsService:
         date_to: Optional[str] = None
     ):
         """Get dashboard summary statistics"""
+        # Check cache first
+        cache_key = self._get_cache_key("dashboard_summary", date_from=date_from, date_to=date_to)
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         try:
             # Use centralized date filter utility
             filters = build_date_filter(date_from, date_to)
@@ -94,7 +135,7 @@ class AnalyticsService:
             results = await self.cases_collection.aggregate(pipeline).to_list(None)
             facets = results[0] if results else {}
 
-            return {
+            result = {
                 "period": {
                     "from": date_from or "all-time",
                     "to": date_to or "today"
@@ -110,12 +151,23 @@ class AnalyticsService:
                 "top_abuse_types": facets.get("top_abuse_types", []),
                 "trend": "up" if new_cases > 0 else "stable"
             }
+            
+            # Cache the result
+            await self._save_to_cache(cache_key, result)
+            
+            return result
         except Exception as e:
             logger.error(f"Error getting dashboard summary: {e}")
             raise
 
     async def get_county_analysis(self, county: str):
         """Get analysis for specific county"""
+        # Check cache first
+        cache_key = self._get_cache_key("county_analysis", county=county)
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         try:
             severity_expr = get_severity_aggregation_stage()
             
@@ -158,13 +210,24 @@ class AnalyticsService:
             ]
 
             results = await self.cases_collection.aggregate(pipeline).to_list(None)
-            return results[0] if results else {}
+            result = results[0] if results else {}
+            
+            # Cache the result
+            await self._save_to_cache(cache_key, result)
+            
+            return result
         except Exception as e:
             logger.error(f"Error analyzing county: {e}")
             raise
 
     async def get_abuse_type_analysis(self, abuse_type: str):
         """Get analysis for specific abuse type"""
+        # Check cache first
+        cache_key = self._get_cache_key("abuse_type_analysis", abuse_type=abuse_type)
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         try:
             severity_expr = get_severity_aggregation_stage()
             
@@ -196,7 +259,12 @@ class AnalyticsService:
             ]
 
             results = await self.cases_collection.aggregate(pipeline).to_list(None)
-            return results[0] if results else {}
+            result = results[0] if results else {}
+            
+            # Cache the result
+            await self._save_to_cache(cache_key, result)
+            
+            return result
         except Exception as e:
             logger.error(f"Error analyzing abuse type: {e}")
             raise
@@ -207,6 +275,12 @@ class AnalyticsService:
         year: Optional[int] = None
     ):
         """Get time series data for trends"""
+        # Check cache first
+        cache_key = self._get_cache_key("time_series", granularity=granularity, year=year)
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         try:
             if not year:
                 year = datetime.now(timezone.utc).year
@@ -304,18 +378,29 @@ class AnalyticsService:
                 ]
 
             results = await self.cases_collection.aggregate(pipeline).to_list(None)
-            return {
+            result = {
                 "year": year,
                 "granularity": granularity,
                 "data": results,
                 "date_field_used": date_field
             }
+            
+            # Cache the result
+            await self._save_to_cache(cache_key, result)
+            
+            return result
         except Exception as e:
             logger.error(f"Error getting time series data: {e}")
             raise
 
     async def get_severity_distribution(self):
         """Get severity distribution across all cases"""
+        # Check cache first
+        cache_key = self._get_cache_key("severity_distribution")
+        cached = await self._get_from_cache(cache_key)
+        if cached:
+            return cached
+        
         try:
             severity_expr = get_severity_aggregation_stage()
             
@@ -337,6 +422,9 @@ class AnalyticsService:
             for r in results:
                 r["percentage"] = round((r["count"] / total * 100), 2) if total > 0 else 0
 
+            # Cache the result
+            await self._save_to_cache(cache_key, results)
+            
             return results
         except Exception as e:
             logger.error(f"Error getting severity distribution: {e}")
